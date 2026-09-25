@@ -62,3 +62,14 @@ def test_missing_wav(tmp_path):
     assert audio.duration_seconds(missing) == 0
     assert audio.tail_level(missing).silent
     assert audio.growth(missing, 0) == 0
+
+
+def test_is_growing_uses_recent_write(tmp_path):
+    import os, time
+    wav = tmp_path / "a.wav"
+    _wav(wav, [0] * 10)
+    assert audio.is_growing(wav, interval=0)
+    old = time.time() - 60
+    os.utime(wav, (old, old))
+    assert not audio.is_growing(wav, interval=0)
+    assert not audio.is_growing(tmp_path / "missing.wav", interval=0)

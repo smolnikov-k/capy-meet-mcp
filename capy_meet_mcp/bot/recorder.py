@@ -20,6 +20,7 @@ class AudioRecorder:
         self._output_path: str | None = None
         self._start_time: float | None = None
         self._is_recording: bool = False
+        self._log_path: Path | None = None
 
     @property
     def is_recording(self) -> bool:
@@ -45,21 +46,30 @@ class AudioRecorder:
         cmd = [
             "ffmpeg",
             "-y",                              # Overwrite output
+            "-nostats",                        # No progress lines
+            "-loglevel", "warning",
             "-f", "pulse",                     # PulseAudio input
             "-i", os.getenv("PULSE_SINK", "meeting_record") + ".monitor",  # Virtual sink's monitor
             "-ac", "1",                        # Mono
             "-ar", "16000",                    # 16kHz (optimal for Whisper)
             "-acodec", "pcm_s16le",            # 16-bit PCM
+            "-flush_packets", "1",             # Grow the file steadily, not in bursts
             output_path,
         ]
 
         logger.info("Starting FFmpeg recording to %s", output_path)
 
-        self._process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        # stderr goes to a file, never to an unread pipe: once the 64 KB pipe
+        # buffer fills, FFmpeg blocks on write and the recording silently stops
+        # growing mid-call (seen live after ~13 minutes).
+        self._log_path = Path(output_path).with_name("ffmpeg.log")
+        with self._log_path.open("ab") as ffmpeg_log:
+            self._process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=ffmpeg_log,
+            )
         self._start_time = time.time()
         self._is_recording = True
         logger.info("Recording started (PID: %d)", self._process.pid)
@@ -83,11 +93,12 @@ class AudioRecorder:
             logger.warning("FFmpeg process already terminated")
 
         try:
-            _, stderr = await asyncio.wait_for(
-                self._process.communicate(), timeout=10
-            )
+            await asyncio.wait_for(self._process.wait(), timeout=10)
             if self._process.returncode not in (0, 255):
-                stderr_text = stderr.decode(errors="replace") if stderr else ""
+                try:
+                    stderr_text = self._log_path.read_text(errors="replace") if self._log_path else ""
+                except FileNotFoundError:
+                    stderr_text = ""
                 logger.warning(
                     "FFmpeg exited with code %d: %s",
                     self._process.returncode,

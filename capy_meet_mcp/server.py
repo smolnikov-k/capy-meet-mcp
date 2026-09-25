@@ -20,7 +20,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from capy_meet_mcp import store
-from capy_meet_mcp.audio import duration_seconds, growth, tail_level
+from capy_meet_mcp.audio import duration_seconds, growth, is_growing, seconds_since_write, tail_level
 
 mcp = FastMCP("capy-meet")
 
@@ -52,11 +52,13 @@ def _probe(rec_id: str) -> dict:
     wav = store.rec_dir(rec_id) / "audio.wav"
     if not wav.exists():
         return {"wav_exists": False}
-    grew = growth(wav, 2.0)
+    growing = is_growing(wav)
+    age = seconds_since_write(wav)
     tail = tail_level(wav, 20.0)
     return {
         "wav_exists": True,
-        "wav_growing": grew > 0,
+        "wav_growing": growing,
+        "seconds_since_write": None if age is None else round(age, 1),
         "minutes": round(duration_seconds(wav) / 60, 1),
         "tail_rms_db": None if tail.rms_db == float("-inf") else round(tail.rms_db, 1),
         "tail_silent": tail.silent,
@@ -143,7 +145,9 @@ def join_meeting(url: str, display_name: str = "", platform: str = "auto", wait_
                     "engine_log_tail": state.get("engine_log_tail", "")[-600:], "dir": str(d),
                     "screenshot": str(d / "debug_failed_join.png")
                     if (d / "debug_failed_join.png").exists() else None}
-        if (d / "audio.wav").exists():
+        # Joining is proven only by the size actually increasing: a fresh
+        # mtime alone would also match a file FFmpeg created and then stalled on.
+        if (d / "audio.wav").exists() and growth(d / "audio.wav", 3.0) > 0:
             probe = _probe(rec_id)
             if probe.get("wav_growing"):
                 return {"ok": True, "id": rec_id, "joined": True, **probe,

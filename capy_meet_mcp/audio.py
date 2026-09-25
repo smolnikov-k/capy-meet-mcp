@@ -8,6 +8,7 @@ running the WAV header is not final, so the probes read raw bytes after the
 from __future__ import annotations
 
 import math
+import os
 import struct
 import time
 from dataclasses import dataclass
@@ -63,6 +64,26 @@ def tail_level(path: Path, seconds: float = 20.0) -> TailLevel:
     rms = math.sqrt(sum(v * v for v in values) / count)
     peak = max(abs(v) for v in values)
     return TailLevel(count / SAMPLE_RATE, _db(rms), _db(peak))
+
+
+def seconds_since_write(path: Path) -> float | None:
+    """How long ago the file was last written; None if it does not exist."""
+    try:
+        return max(0.0, time.time() - os.stat(path).st_mtime)
+    except FileNotFoundError:
+        return None
+
+
+def is_growing(path: Path, interval: float = 4.0, fresh: float = 10.0) -> bool:
+    """True if the recorder is writing: the file grew during ``interval`` or
+    was written within the last ``fresh`` seconds. Either alone misreads a
+    writer that flushes in bursts."""
+    age = seconds_since_write(path)
+    if age is None:
+        return False
+    if age < fresh:
+        return True
+    return growth(path, interval) > 0
 
 
 def growth(path: Path, interval: float = 2.0) -> int:

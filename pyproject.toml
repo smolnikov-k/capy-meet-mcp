@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "capy-meet-mcp"
-version = "1.0.0"
+version = "1.0.1"
 description = "CapyAgent Meet MCP: запись онлайн-встреч (Телемост, Google Meet, Zoom, Webex) и локальная расшифровка"
 readme = "README.md"
 authors = [{ name = "Smolnikov" }]

@@ -59,7 +59,7 @@ uv sync --frozen --no-dev
 
 ## Что лежит в папке записи
 
-`meta.json` и `state.json` описывают запрос и состояние записи, `audio.wav` это сама запись (16 кГц, моно), `transcript.txt` и `segments.json` содержат расшифровку, `engine.log` и `worker.log` это журналы. Если войти не удалось, рядом появится снимок экрана `debug_failed_join.png`.
+`meta.json` и `state.json` описывают запрос и состояние записи, `audio.wav` это сама запись (16 кГц, моно), `transcript.txt` и `segments.json` содержат расшифровку, `engine.log`, `worker.log` и `ffmpeg.log` это журналы. Если войти не удалось, рядом появится снимок экрана `debug_failed_join.png`.
 
 ## Лицензия
 
