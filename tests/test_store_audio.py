@@ -73,3 +73,10 @@ def test_is_growing_uses_recent_write(tmp_path):
     os.utime(wav, (old, old))
     assert not audio.is_growing(wav, interval=0)
     assert not audio.is_growing(tmp_path / "missing.wav", interval=0)
+
+
+def test_worker_alive_checks_cmdline():
+    import os
+    rec_id = "20260925-120000-zoom-abcd"
+    assert not store.worker_alive(os.getpid(), rec_id)  # alive, but not our worker
+    assert not store.worker_alive(None, rec_id)

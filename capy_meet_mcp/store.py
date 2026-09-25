@@ -118,6 +118,19 @@ def pid_alive(pid: int | None) -> bool:
         return True
 
 
+def worker_alive(pid: int | None, rec_id: str) -> bool:
+    """The recording worker is running: the pid is alive AND is our worker
+    for this id. State lives on disk, so this works for a server restarted
+    after the worker was spawned; the cmdline check guards against pid reuse."""
+    if not pid_alive(pid):
+        return False
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except (FileNotFoundError, PermissionError):
+        return True
+    return b"capy_meet_mcp.worker" in cmdline and rec_id.encode() in cmdline
+
+
 def hhmmss(seconds: float) -> str:
     s = int(seconds)
     return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"

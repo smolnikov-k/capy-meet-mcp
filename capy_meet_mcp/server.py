@@ -10,6 +10,7 @@ joining, a growing WAV is.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -36,14 +37,53 @@ def _state(rec_id: str) -> tuple[dict, dict]:
     return store.read_json(d / "meta.json"), store.read_json(d / "state.json")
 
 
+def _scope_prefix(rec_id: str) -> list[str]:
+    """Run the worker in its own systemd scope when systemd is there.
+
+    A new session is not enough: the worker would still sit in the agent
+    service's cgroup, and any restart of the agent (update, config change,
+    crash with Restart=always) would kill the recording mid-call. A transient
+    scope moves the worker and its Chromium/FFmpeg out of that cgroup.
+    ``systemd-run --scope`` execs the command in place, so the pid we get back
+    is the worker's own pid. Without systemd we fall back to a plain spawn.
+    """
+    if os.getenv("CAPY_MEET_NO_SCOPE") == "1" or not os.path.isdir("/run/systemd/system"):
+        return []
+    systemd_run = shutil.which("systemd-run")
+    if not systemd_run:
+        return []
+    unit = ["--unit", f"capymeet-{rec_id}", "--collect", "--quiet", "--scope"]
+    if os.geteuid() == 0:
+        return [systemd_run, *unit]
+    probe = subprocess.run(["systemctl", "--user", "is-system-running"],
+                           capture_output=True, text=True, timeout=10)
+    if probe.stdout.strip() in ("running", "degraded"):
+        return [systemd_run, "--user", *unit]
+    return []
+
+
 def _spawn_worker(rec_id: str, *extra: str) -> int:
     d = store.rec_dir(rec_id)
+    cmd = [sys.executable, "-m", "capy_meet_mcp.worker", rec_id, *extra]
+    prefix = _scope_prefix(rec_id)
     with (d / "worker.out").open("ab") as out:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "capy_meet_mcp.worker", rec_id, *extra],
+            prefix + cmd,
             stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
             start_new_session=True, close_fds=True,
         )
+    if prefix:
+        # systemd-run exits with an error instead of exec'ing when it cannot
+        # create the scope; fall back to a plain spawn rather than lose the call.
+        time.sleep(1)
+        if proc.poll() not in (None, 0):
+            with (d / "worker.out").open("ab") as out:
+                proc = subprocess.Popen(
+                    cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                    start_new_session=True, close_fds=True,
+                )
+        else:
+            store.update_state(rec_id, scope=f"capymeet-{rec_id}.scope")
     return proc.pid
 
 
@@ -121,7 +161,7 @@ def join_meeting(url: str, display_name: str = "", platform: str = "auto", wait_
     for other in store.list_ids()[:20]:
         meta, state = _state(other)
         if meta.get("url") == url and state.get("phase") in ACTIVE_PHASES \
-                and store.pid_alive(state.get("worker_pid")):
+                and store.worker_alive(state.get("worker_pid"), other):
             return {"ok": True, "id": other, "already_running": True,
                     "status": _verdict(state, _probe(other), True)}
 
@@ -151,7 +191,7 @@ def join_meeting(url: str, display_name: str = "", platform: str = "auto", wait_
             probe = _probe(rec_id)
             if probe.get("wav_growing"):
                 return {"ok": True, "id": rec_id, "joined": True, **probe,
-                        "status": _verdict(state, probe, store.pid_alive(state.get("worker_pid")))}
+                        "status": _verdict(state, probe, store.worker_alive(state.get("worker_pid"), rec_id))}
     _, state = _state(rec_id)
     return {"ok": True, "id": rec_id, "joined": False,
             "status": "вход ещё не подтверждён: запись не началась за отведённое время, "
@@ -164,7 +204,7 @@ def meeting_status(id: str) -> dict:
     """Состояние записи: в звонке ли бот, растёт ли файл, есть ли звук в последних
     20 секундах, сколько минут записано, идёт ли расшифровка."""
     meta, state = _state(id)
-    alive = store.pid_alive(state.get("worker_pid"))
+    alive = store.worker_alive(state.get("worker_pid"), id)
     probe = _probe(id) if state.get("phase") in ACTIVE_PHASES else {}
     return {
         "id": id, "platform": meta.get("platform"), "url": meta.get("url"),
@@ -180,7 +220,7 @@ def leave_meeting(id: str) -> dict:
     Расшифровка идёт в фоне; готовый текст отдаёт get_transcript."""
     _, state = _state(id)
     pid = state.get("worker_pid")
-    if state.get("phase") not in ACTIVE_PHASES or not store.pid_alive(pid):
+    if state.get("phase") not in ACTIVE_PHASES or not store.worker_alive(pid, id):
         return {"ok": False, "id": id, "phase": state.get("phase"),
                 "status": "запись уже не идёт"}
     os.kill(pid, signal.SIGTERM)
@@ -190,7 +230,7 @@ def leave_meeting(id: str) -> dict:
         _, state = _state(id)
         if state.get("phase") not in ACTIVE_PHASES:
             break
-    alive = store.pid_alive(state.get("worker_pid"))
+    alive = store.worker_alive(state.get("worker_pid"), id)
     return {"ok": True, "id": id, "phase": state.get("phase"),
             "audio_minutes": round((state.get("audio_seconds") or 0) / 60, 1),
             "status": _verdict(state, {}, alive)}
@@ -207,7 +247,7 @@ def get_transcript(id: str, offset: int = 0) -> dict:
               "wav": str(d / "audio.wav") if (d / "audio.wav").exists() else None,
               "transcript_path": str(text_path) if text_path.exists() else None}
     if not text_path.exists():
-        alive = store.pid_alive(state.get("worker_pid"))
+        alive = store.worker_alive(state.get("worker_pid"), id)
         result["status"] = _verdict(state, {}, alive)
         return result
     text = text_path.read_text(encoding="utf-8")
@@ -241,7 +281,7 @@ def transcribe_recording(id: str) -> dict:
     записи умер, а WAV остался. Идёт в фоне, результат в get_transcript."""
     _, state = _state(id)
     d = store.rec_dir(id)
-    if store.pid_alive(state.get("worker_pid")):
+    if store.worker_alive(state.get("worker_pid"), id):
         return {"ok": False, "status": "по этой записи ещё работает процесс, дождись его"}
     if duration_seconds(d / "audio.wav") < 1:
         return {"ok": False, "status": "записи нет, расшифровывать нечего"}
